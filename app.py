@@ -16,16 +16,6 @@ SHARED_SECRET = "YOUR_SHARED_SECRET_1A2B3C4D"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def generate_signature(data: dict, secret: str) -> str:
-    """Generate HMAC-SHA256 signature"""
-    message = f"{data.get('key')}:{data.get('guid')}:{data.get('version')}"
-    signature = hmac.new(
-        secret.encode(),
-        message.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return signature
-
 @app.route('/')
 def home():
     return jsonify({
@@ -48,18 +38,17 @@ def health():
 
 @app.route('/api/v1/check_license', methods=['POST'])
 def check_license():
-    """
-    Check license validity
-    Request: {
-        "key": "LICENSE-KEY",
-        "guid": "HWID-GUID",
-        "version": 202
-    }
-    """
+    """Check license validity"""
     try:
         data = request.get_json()
         
+        # Debug: Print request
+        print(f"\n{'='*50}")
+        print(f"📥 License Check Request")
+        print(f"{'='*50}")
+        
         if not data:
+            print("❌ No JSON data received")
             return jsonify({
                 "status": "DENIED",
                 "code": 400,
@@ -70,7 +59,12 @@ def check_license():
         hwid = data.get('guid')
         version = data.get('version')
         
+        print(f"License Key: {license_key}")
+        print(f"HWID: {hwid}")
+        print(f"Version: {version}")
+        
         if not all([license_key, hwid, version]):
+            print("❌ Missing required fields")
             return jsonify({
                 "status": "DENIED",
                 "code": 400,
@@ -78,9 +72,13 @@ def check_license():
             }), 400
         
         # Query license from Supabase
+        print(f"\n🔍 Querying database...")
         response = supabase.table('licenses').select('*').eq('license_key', license_key).execute()
         
+        print(f"Database response: {response.data}")
+        
         if not response.data or len(response.data) == 0:
+            print("❌ License not found in database")
             return jsonify({
                 "status": "DENIED",
                 "code": 404,
@@ -88,9 +86,14 @@ def check_license():
             }), 404
         
         license_data = response.data[0]
+        print(f"\n📋 License Data:")
+        print(f"  - Status: {license_data.get('is_active')}")
+        print(f"  - Expiry: {license_data.get('expiry_date')}")
+        print(f"  - Current HWID: {license_data.get('hwid')}")
         
         # Check if license is active
         if not license_data.get('is_active'):
+            print("❌ License is inactive")
             return jsonify({
                 "status": "DENIED",
                 "code": 403,
@@ -100,6 +103,7 @@ def check_license():
         # Check expiry date
         expiry_date = datetime.fromisoformat(license_data['expiry_date'].replace('Z', '+00:00'))
         if datetime.now(expiry_date.tzinfo) > expiry_date:
+            print("❌ License expired")
             return jsonify({
                 "status": "DENIED",
                 "code": 403,
@@ -111,49 +115,74 @@ def check_license():
         
         if registered_hwid is None:
             # First time use - register HWID
-            supabase.table('licenses').update({
+            print(f"\n🔄 First time activation!")
+            print(f"   Registering HWID: {hwid}")
+            
+            update_result = supabase.table('licenses').update({
                 'hwid': hwid,
                 'last_used': datetime.utcnow().isoformat()
             }).eq('license_key', license_key).execute()
             
+            print(f"✅ Update Result: {update_result.data}")
+            
             # Log usage
-            supabase.table('license_usage_logs').insert({
-                'license_key': license_key,
-                'hwid': hwid,
-                'action': 'first_activation',
-                'ip_address': request.remote_addr
-            }).execute()
+            try:
+                supabase.table('license_usage_logs').insert({
+                    'license_key': license_key,
+                    'hwid': hwid,
+                    'action': 'first_activation',
+                    'ip_address': request.remote_addr
+                }).execute()
+                print("✅ Usage logged")
+            except Exception as log_error:
+                print(f"⚠️ Failed to log usage: {log_error}")
+            
+            print(f"\n{'='*50}")
+            print(f"✅ LICENSE GRANTED - First Activation")
+            print(f"{'='*50}\n")
             
             return jsonify({
                 "status": "GRANTED",
                 "code": 200,
                 "message": "License verified. Access granted.",
-                "secret_key": SHARED_SECRET
+                "hwid": hwid
             }), 200
         
         elif registered_hwid == hwid:
             # HWID matches - update last used
+            print(f"\n✅ HWID Match!")
+            
             supabase.table('licenses').update({
                 'last_used': datetime.utcnow().isoformat()
             }).eq('license_key', license_key).execute()
             
             # Log usage
-            supabase.table('license_usage_logs').insert({
-                'license_key': license_key,
-                'hwid': hwid,
-                'action': 'verification',
-                'ip_address': request.remote_addr
-            }).execute()
+            try:
+                supabase.table('license_usage_logs').insert({
+                    'license_key': license_key,
+                    'hwid': hwid,
+                    'action': 'verification',
+                    'ip_address': request.remote_addr
+                }).execute()
+            except Exception as log_error:
+                print(f"⚠️ Failed to log usage: {log_error}")
+            
+            print(f"\n{'='*50}")
+            print(f"✅ LICENSE GRANTED - Verified")
+            print(f"{'='*50}\n")
             
             return jsonify({
                 "status": "GRANTED",
                 "code": 200,
-                "message": "License verified. Access granted.",
-                "secret_key": SHARED_SECRET
+                "message": "License verified. Access granted."
             }), 200
         
         else:
             # HWID mismatch
+            print(f"\n❌ HWID Mismatch!")
+            print(f"   Expected: {registered_hwid}")
+            print(f"   Received: {hwid}")
+            
             return jsonify({
                 "status": "DENIED",
                 "code": 403,
@@ -161,7 +190,10 @@ def check_license():
             }), 403
     
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"\n❌ ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
         return jsonify({
             "status": "ERROR",
             "code": 500,
@@ -170,13 +202,7 @@ def check_license():
 
 @app.route('/api/v1/register_hwid', methods=['POST'])
 def register_hwid():
-    """
-    Manually register HWID (for resetting)
-    Request: {
-        "key": "LICENSE-KEY",
-        "guid": "NEW-HWID"
-    }
-    """
+    """Manually register HWID (for resetting)"""
     try:
         data = request.get_json()
         
